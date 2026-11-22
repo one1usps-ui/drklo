@@ -1,0 +1,140 @@
+name: Build Drklo APK
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clone Telegram sources with submodules
+        run: git clone --recursive --shallow-submodules --depth 1 https://github.com/DrKLO/Telegram.git tg
+      - name: Apply Drklo design
+        run: |
+          sudo apt-get install -y fonts-inter
+          pip install pillow numpy
+          cat > restyle.py << 'PYEOF'
+          import re, glob, colorsys, shutil, os
+          from PIL import Image, ImageDraw, ImageFont
+          import sys
+          ROOT=sys.argv[1].rstrip("/"); FONTS=sys.argv[2].rstrip("/")+"/"; M=ROOT+"/TMessagesProj/src/main"
+          log=[]
+          # ---- 1. app name ----
+          n=0
+          for f in glob.glob(M+'/res/values*/strings.xml'):
+              s=open(f,encoding='utf-8').read()
+              s2=re.sub(r'(<string name="AppName">)[^<]*(</string>)',r'\1Drklo\2',s)
+              s2=re.sub(r'(<string name="AppNameBeta">)[^<]*(</string>)',r'\1Drklo Beta\2',s2)
+              if s2!=s: open(f,'w',encoding='utf-8').write(s2); n+=1
+          log.append(f'AppName -> Drklo in {n} strings.xml')
+          # ---- 2. blue -> purple hue shift ----
+          def shift(r,g,b):
+              h,s,v=colorsys.rgb_to_hsv(r/255,g/255,b/255); hd=h*360
+              if 185<=hd<=245 and s>=.2:
+                  h=(262+(hd-210)*.3)/360
+                  r,g,b=[round(c*255) for c in colorsys.hsv_to_rgb(h,min(1,s*1.05),v)]
+                  return r,g,b,True
+              return r,g,b,False
+          cnt=[0]
+          def lit(m):
+              a,rgb=m.group(1),m.group(2); r,g,b=int(rgb[0:2],16),int(rgb[2:4],16),int(rgb[4:6],16)
+              r,g,b,ch=shift(r,g,b)
+              if ch: cnt[0]+=1
+              return f'0x{a}{r:02X}{g:02X}{b:02X}' if ch else m.group(0)
+          f=M+'/java/org/telegram/ui/ActionBar/ThemeColors.java'
+          s=open(f,encoding='utf-8').read(); s=re.sub(r'0x([fF][fF])([0-9a-fA-F]{6})\b',lit,s); open(f,'w',encoding='utf-8').write(s)
+          log.append(f'ThemeColors.java: {cnt[0]} blue colors -> purple'); cnt[0]=0
+          # first accent of Blue theme
+          f=M+'/java/org/telegram/ui/ActionBar/Theme.java'; s=open(f,encoding='utf-8').read()
+          s=s.replace('new int[]    { 0xFF5890C5,','new int[]    { 0xFF8A5CE0,',1); s=s.replace('themeInfo.previewBackgroundColor = 0xff95beec;','themeInfo.previewBackgroundColor = 0xffb7a0ec;',1); s=s.replace('themeInfo.previewOutColor = 0xffd0e6ff;','themeInfo.previewOutColor = 0xffe3d6ff;',1)
+          open(f,'w',encoding='utf-8').write(s)
+          # attheme assets: key=signedInt
+          c2=0
+          for f in glob.glob(M+'/assets/*.attheme'):
+              lines=open(f,encoding='utf-8',errors='surrogateescape').read().split('\n'); out=[]
+              for ln in lines:
+                  m=re.match(r'^([\w\.]+)=(-?\d+)$',ln.strip())
+                  if m:
+                      v=int(m.group(2))&0xffffffff; a=v>>24; r,g,b=(v>>16)&255,(v>>8)&255,v&255
+                      r,g,b,ch=shift(r,g,b)
+                      if ch:
+                          nv=(a<<24)|(r<<16)|(g<<8)|b; nv=nv-(1<<32) if nv>=1<<31 else nv; ln=f'{m.group(1)}={nv}'; c2+=1
+                  out.append(ln)
+              open(f,'w',encoding='utf-8',errors='surrogateescape').write('\n'.join(out))
+          log.append(f'attheme assets: {c2} colors recolored')
+          # res colors.xml
+          f=M+'/res/values/colors.xml'; s=open(f,encoding='utf-8').read(); c3=[0]
+          def hx(m):
+              t=m.group(2); 
+              if len(t)==6: a,rgb='',t
+              else: a,rgb=t[:2],t[2:]
+              r,g,b=int(rgb[0:2],16),int(rgb[2:4],16),int(rgb[4:6],16); r,g,b,ch=shift(r,g,b)
+              if ch: c3[0]+=1; return f'{m.group(1)}{a}{r:02x}{g:02x}{b:02x}'
+              return m.group(0)
+          s=re.sub(r'(>#)([0-9a-fA-F]{6,8})',hx,s); open(f,'w',encoding='utf-8').write(s); log.append(f'colors.xml: {c3[0]} colors')
+          # ---- 3. icons ----
+          FNT=ImageFont.truetype(FONTS+'Inter-Black.otf',400)
+          def make(size,kind):
+              S=size*4; im=Image.new('RGBA',(S,S),(0,0,0,0)); d=ImageDraw.Draw(im)
+              if kind!='fg':
+                  g=Image.new('RGBA',(S,S)); gp=g.load()
+                  for y in range(S):
+                      for x in range(0,S,1):
+                          pass
+                  import numpy as np
+                  yy,xx=np.mgrid[0:S,0:S]; t=((xx+yy)/(2*S))[...,None]
+                  c0=np.array([150,100,255]); c1=np.array([72,30,176]); arr=(c0*(1-t)+c1*t).astype(np.uint8)
+                  g=Image.fromarray(np.dstack([arr,np.full((S,S,1),255,np.uint8)]),'RGBA')
+                  mask=Image.new('L',(S,S),0); md=ImageDraw.Draw(mask)
+                  if kind=='round': md.ellipse([0,0,S-1,S-1],fill=255)
+                  else: md.rounded_rectangle([0,0,S-1,S-1],radius=int(S*.22),fill=255)
+                  im.paste(g,(0,0),mask)
+              bw=S*(.44 if kind=='fg' else .56); bh=bw*.78; cx=S/2; cy=S/2-S*.02
+              x0,y0,x1,y1=cx-bw/2,cy-bh/2,cx+bw/2,cy+bh/2
+              d.rounded_rectangle([x0,y0,x1,y1],radius=bh*.34,fill=(255,255,255,255))
+              d.polygon([(x0+bw*.14,y1-bh*.08),(x0+bw*.14,y1+bh*.28),(x0+bw*.38,y1-bh*.06)],fill=(255,255,255,255))
+              f=ImageFont.truetype(FONTS+'Inter-Black.otf',int(bh*.78))
+              d.text((cx,cy-bh*.02),'D',font=f,fill=(104,58,214,255),anchor='mm')
+              return im.resize((size,size),Image.LANCZOS)
+          for dens in ('mdpi','hdpi','xhdpi','xxhdpi','xxxhdpi'):
+              D=f'{M}/res/mipmap-{dens}/'
+              for nme,kind in (('ic_launcher','full'),('ic_launcher_round','round'),('icon_foreground','fg'),('icon_foreground_round','fg')):
+                  sz=Image.open(D+nme+'.png').size[0]; make(sz,kind).save(D+nme+'.png')
+          open(M+'/res/drawable/icon_background.xml','w').write('<?xml version="1.0" encoding="utf-8"?>\n<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">\n    <gradient android:angle="315" android:startColor="#9664FF" android:endColor="#481EB0" />\n</shape>\n')
+          open(M+'/res/drawable/icon_background_round.xml','w').write('<?xml version="1.0" encoding="utf-8"?>\n<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">\n    <gradient android:angle="315" android:startColor="#9664FF" android:endColor="#481EB0" />\n</shape>\n')
+          open(M+'/res/drawable/icon_plane.xml','w').write('<?xml version="1.0" encoding="utf-8"?>\n<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">\n    <path android:fillColor="#FFFFFFFF" android:pathData="M36,38 H72 A8,8 0 0 1 80,46 V64 A8,8 0 0 1 72,72 H54 L42,82 V72 H36 A8,8 0 0 1 28,64 V46 A8,8 0 0 1 36,38 Z" />\n</vector>\n')
+          log.append('icons: ic_launcher/round/foreground (5 densities) + backgrounds + monochrome')
+          # ---- 4. fonts ----
+          FD=FONTS; A=M+'/assets/fonts/'
+          for src,dst in (('Inter-SemiBold.otf','inter_medium.otf'),('Inter-ExtraBold.otf','inter_extrabold.otf'),('Inter-SemiBoldItalic.otf','inter_mediumitalic.otf'),('Inter-Italic.otf','inter_italic.otf')):
+              shutil.copy(FD+src,A+dst)
+          rep={'rmedium.ttf':'inter_medium.otf','rextrabold.ttf':'inter_extrabold.otf','rmediumitalic.ttf':'inter_mediumitalic.otf','ritalic.ttf':'inter_italic.otf'}
+          fc=0
+          for f in glob.glob(M+'/java/**/*.java',recursive=True):
+              s=open(f,encoding='utf-8').read(); s2=s
+              for k,v in rep.items(): s2=s2.replace('fonts/'+k,'fonts/'+v)
+              if s2!=s: open(f,'w',encoding='utf-8').write(s2); fc+=1
+          log.append(f'fonts: Inter (SemiBold/ExtraBold/Italic) in {fc} java files')
+          # ---- 5. bubbles ----
+          f=M+'/java/org/telegram/messenger/SharedConfig.java'; s=open(f,encoding='utf-8').read()
+          s=s.replace('public static int bubbleRadius = 17;','public static int bubbleRadius = 26;').replace('preferences.getInt("bubbleRadius", 17)','preferences.getInt("bubbleRadius", 26)'); open(f,'w',encoding='utf-8').write(s)
+          log.append('bubbleRadius default 17 -> 26')
+          print('\n'.join(log))
+          PYEOF
+          python3 restyle.py tg /usr/share/fonts/opentype/inter/
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - name: Install SDK and NDK
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+      - name: Build APK
+        working-directory: tg
+        run: |
+          chmod +x gradlew
+          ./gradlew :TMessagesProj_App:assembleAfatRelease --no-daemon --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: drklo-apk
+          path: tg/TMessagesProj_App/build/outputs/apk/afat/release/*.apk
