@@ -28,6 +28,29 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      - name: Подтянуть submodules (их нет в zip с GitHub)
+        run: |
+          set -e
+          VCODE=$(grep '^APP_VERSION_CODE=' gradle.properties | cut -d= -f2)
+          git clone --depth 1 https://github.com/TelegramMessenger/Telegram-Android.git /tmp/tgofficial
+          cd /tmp/tgofficial
+          TAG=$(git ls-remote --tags origin "*${VCODE}*" | awk '{print $2}' | sed 's#refs/tags/##; s#\^{}##' | sort -u | head -n1 || true)
+          if [ -n "$TAG" ]; then
+            echo "Используем тег $TAG"
+            git fetch --depth 1 origin "refs/tags/$TAG:refs/tags/$TAG" && git checkout "$TAG"
+          else
+            echo "Тег для $VCODE не найден, используем master"
+          fi
+          git submodule update --init --recursive --depth 1 --jobs 8 || git submodule update --init --recursive --jobs 8
+          cd "$GITHUB_WORKSPACE"
+          for d in $(grep 'path = ' /tmp/tgofficial/.gitmodules | sed 's/.*= //'); do
+            mkdir -p "$d"
+            rsync -a --exclude='.git' "/tmp/tgofficial/$d/" "$d/"
+            echo "$d: $(ls -A "$d" | wc -l) файлов"
+          done
+          test -f TMessagesProj_Modules/media/core_settings.gradle
+          rm -rf /tmp/tgofficial
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -62,7 +85,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: telegram-liquid-glass-apk
+          name: gleam-apk
           path: TMessagesProj_AppStandalone/build/outputs/apk/**/*.apk
           if-no-files-found: error
           
